@@ -1,0 +1,39 @@
+# Opt-in overlay: docker compose -f compose.yaml -f compose.redpitaya.yaml ...
+services:
+  redpitaya:
+    profiles: [redpitaya]
+    image: airy-slam/redpitaya:${ROS_DISTRO:-jazzy}
+    build:
+      context: .
+      dockerfile: docker/redpitaya/Dockerfile
+      args:
+        ROS_DISTRO: ${ROS_DISTRO:-jazzy}
+    network_mode: host
+    ipc: host
+    restart: unless-stopped
+    stop_grace_period: 15s
+    cpus: 1.0
+    mem_limit: 256m
+    environment:
+      ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-42}
+      RMW_IMPLEMENTATION: ${RMW_IMPLEMENTATION:-rmw_cyclonedds_cpp}
+      CYCLONEDDS_URI: file:///etc/cyclonedds.xml
+      REDPITAYA_HOST: ${REDPITAYA_HOST:-rp-f0d343.local}
+      REDPITAYA_RECORD: ${REDPITAYA_RECORD:-}
+      REDPITAYA_PORT: ${REDPITAYA_PORT:-22}
+      REDPITAYA_CHANNELS: ${REDPITAYA_CHANNELS:-1}
+      REDPITAYA_SHORT_US: ${REDPITAYA_SHORT_US:-2}
+      REDPITAYA_LONG_US: ${REDPITAYA_LONG_US:-25}
+    volumes:
+      - ./docker/cyclonedds.xml:/etc/cyclonedds.xml:ro
+      - ./redpitaya/runtime:/auth:ro
+      - ./redpitaya/captures:/captures
+    logging:
+      driver: local
+      options:
+        max-size: "5m"
+        max-file: "2"
+  gamma_rs:
+    # Keep the installed Sigma50 image as the original starter's default.
+    image: airy-slam/gamma-rs:${ROS_DISTRO:-jazzy}-redpitaya
+    command: ["airy-gamma", "--detector", "redpitaya", "--roi", "gross", "--method", "${GAMMA_METHOD:-abapsl}", "--backend", "${GAMMA_BACKEND:-gpu}"]

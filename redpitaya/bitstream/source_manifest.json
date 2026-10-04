@@ -1,0 +1,22 @@
+{
+  "vendor_url": "https://github.com/RedPitaya/RedPitaya-FPGA",
+  "vendor_commit": "728a4f37e9c0a9b5ba1d9b7a0d44c38bbd2dc674",
+  "model": "Z20_4",
+  "part": "xc7z020clg400-1",
+  "vivado": "2025.1",
+  "personality": "four-channel MCA; stock oscilloscope reloaded separately",
+  "integration_sha256": {
+    "prj/v0.94/rtl/red_pitaya_top_4ADC.sv": "07fcf209d9265ae9d59578ad615e2007d1807238e2a218c428b808b92c29e463",
+    "red_pitaya_vivado_Z20_4.tcl": "b40b1d5fe0cfb53847970fd7f501f40a6afa576377d2e3df3378c90a0f7811c3"
+  },
+  "constraints_sha256": {
+    "mca_cdc.xdc": "e7e00a23429131ff80210b048fdddfd079c9543686e1451165c88f4362854fb0"
+  },
+  "register_base": "0x40700000",
+  "rtl_sha256": {
+    "mca_bus_cdc.sv": "89c2f9df35df8924b8e7392495ecd0dc1ccfbc1e4f031130c9015440447d5d85",
+    "mca_core.sv": "e39b528450577228e7bd6c79504997d1ccdbd5dba65d668e22fe569515295b9b",
+    "mca_four.sv": "29180f7806afc294c68cb0cd55844592184698ab05f2c024835091431354562c",
+    "mca_mmio.sv": "f86db3648ba1312a1dcb3481b92c03a933867975d410820cb8a3956c2368c56b"
+  }
+}

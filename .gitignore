@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.venv/
+.DS_Store
+fpga/build/
+fpga/tools/
+fpga/vendor/
+*.log
+*.jou
+redpitaya/runtime/
+redpitaya/captures/
+captures/
+.env
+*.mca
+*.npz
+*.dcp
+*.vvp

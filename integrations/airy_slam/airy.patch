@@ -1,0 +1,549 @@
+diff --git a/gamma/airy_gamma/web/app.js b/gamma/airy_gamma/web/app.js
+index 9e799b7..88d987e 100644
+--- a/gamma/airy_gamma/web/app.js
++++ b/gamma/airy_gamma/web/app.js
+@@ -287,7 +287,8 @@ const loadResult = singleFlight(async () => {
+   // The Rust node reconstructs continuously and reports per-tick timing.
+   const timing = r.tick_ms != null ? `${r.n_bins} bins · tick ${r.tick_ms} ms (p95 ${r.tick_ms_p95}) · ${r.backend}`
+     : `${r.runtime_s} s`;
+-  $('recon-info').textContent = `${r.roi} ${r.roi_kev[0]}–${r.roi_kev[1]} keV · bkg ${r.background_cps} cps · ` +
++  const roiLabel = r.roi_kev ? `${r.roi} ${r.roi_kev[0]}–${r.roi_kev[1]} keV` : 'gross counts · energy uncalibrated';
++  $('recon-info').textContent = `${roiLabel} · bkg ${r.background_cps} cps · ` +
+     `${r.counts} counts / ${r.live_s} s · ${r.n_samples} samples · ${r.n_candidates} of ${r.n_pool} pool points · ` +
+     timing;
+   requestRender();
+@@ -339,6 +340,14 @@ async function loadRates() {
+ }
+ async function loadSpectrum() {
+   const s = await (await fetch('/api/spectrum')).json();
++  if (s.calibrated === false) {
++    const canvas = $('spec'), g = canvas.getContext('2d');
++    g.clearRect(0, 0, canvas.width, canvas.height);
++    g.fillStyle = '#334155';
++    g.font = '14px sans-serif';
++    g.fillText('Red Pitaya energy calibration not configured', 8, 24);
++    return;
++  }
+   const n = s.counts.length, de = s.emax / n;
+   const x = s.counts.map((_, i) => (i + 0.5) * de);
+   const live = Math.max(s.live_s, 1e-6);
+@@ -413,7 +422,7 @@ function connect() {
+     if (m.type === 'hello') {
+       const sel = $('roi'); sel.innerHTML = '';
+       for (const [k, v] of Object.entries(m.rois)) {
+-        const o = document.createElement('option'); o.value = k; o.textContent = `${k} (${v[0]}–${v[1]})`;
++        const o = document.createElement('option'); o.value = k; o.textContent = v ? `${k} (${v[0]}–${v[1]})` : `${k} counts (uncalibrated)`;
+         sel.appendChild(o);
+       }
+       loadMap(m.map_version); loadDensity(); loadResult();
+diff --git a/gamma_rs/src/main.rs b/gamma_rs/src/main.rs
+index a57b64d..a2c9c2c 100644
+--- a/gamma_rs/src/main.rs
++++ b/gamma_rs/src/main.rs
+@@ -14,6 +14,7 @@ mod calib;
+ mod measure;
+ mod recon;
+ mod record;
++mod redpitaya;
+ mod ros;
+ mod state;
+ mod traj;
+@@ -26,6 +27,7 @@ use anyhow::{Result, anyhow};
+ 
+ #[derive(Clone, Debug)]
+ pub struct Args {
++    pub detector: String,
+     pub serial: u32,
+     pub roi: String,
+     pub data_dir: PathBuf,
+@@ -56,6 +58,7 @@ pub struct Args {
+ 
+ fn parse() -> Result<Args> {
+     let mut a = Args {
++        detector: "sigma50".into(),
+         serial: 8018,
+         roi: "gross".into(),
+         data_dir: "/data".into(),
+@@ -86,6 +89,7 @@ fn parse() -> Result<Args> {
+     while let Some(k) = it.next() {
+         let mut v = || it.next().ok_or_else(|| anyhow!("{k} needs a value"));
+         match k.as_str() {
++            "--detector" => a.detector = v()?,
+             "--serial" => a.serial = v()?.parse()?,
+             "--roi" => a.roi = v()?,
+             "--data-dir" => a.data_dir = v()?.into(),
+@@ -122,6 +126,12 @@ fn parse() -> Result<Args> {
+             _ => return Err(anyhow!("unknown argument {k}")),
+         }
+     }
++    if !matches!(a.detector.as_str(), "sigma50" | "redpitaya") {
++        return Err(anyhow!("detector must be sigma50 or redpitaya"));
++    }
++    if a.detector == "redpitaya" && a.roi != "gross" {
++        return Err(anyhow!("Red Pitaya energy calibration is not configured; use --roi gross"));
++    }
+     Ok(a)
+ }
+ 
+diff --git a/gamma_rs/src/measure.rs b/gamma_rs/src/measure.rs
+index b1008e6..dd7aeb8 100644
+--- a/gamma_rs/src/measure.rs
++++ b/gamma_rs/src/measure.rs
+@@ -24,6 +24,9 @@ use crate::state::now_wall;
+ 
+ pub const DETECTOR_SLAM_TOPICS: &[&str] = &[
+     "/sigma50_raw",
++    "/redpitaya/events",
++    "/redpitaya/status",
++    "/redpitaya/counts",
+     "/lightning/pose",
+     "/lightning/keyframe/pose",
+     "/lightning/keyframe/cloud",
+diff --git a/gamma_rs/src/recon.rs b/gamma_rs/src/recon.rs
+index 40c9f0c..fe3c1cf 100644
+--- a/gamma_rs/src/recon.rs
++++ b/gamma_rs/src/recon.rs
+@@ -30,7 +30,8 @@ use crate::state::{Acq, now_wall};
+ pub type GridJson = Value;
+ 
+ pub struct Shared {
+-    pub cal: Calibration,
++    pub cal: Option<Calibration>,
++    pub detector: String,
+     pub rois: Vec<(String, (f32, f32))>,
+     pub roi_name: RwLock<String>,
+     pub acq: RwLock<Acq>,
+@@ -87,17 +88,19 @@ pub struct ReconState {
+ 
+ impl Shared {
+     pub fn new(a: &Args) -> Result<Self> {
+-        let cal = Calibration::load(&a.config_dir.join(format!("sigma50_{}.yaml", a.serial)))?;
+-        let rois = load_rois(&a.config_dir.join("isotopes.yaml"))?;
++        let counts_only = a.detector == "redpitaya";
++        let cal = if counts_only { None } else { Some(Calibration::load(&a.config_dir.join(format!("sigma50_{}.yaml", a.serial)))?) };
++        let rois = if counts_only { vec![("gross".into(), (0.0, crate::state::EMAX_KEV))] } else { load_rois(&a.config_dir.join("isotopes.yaml"))? };
+         if !rois.iter().any(|r| r.0 == a.roi) {
+             anyhow::bail!("unknown ROI {}", a.roi);
+         }
+         let (tx, _) = tokio::sync::broadcast::channel(64);
+         Ok(Self {
+             cal,
++            detector: a.detector.clone(),
+             rois,
+             roi_name: RwLock::new(a.roi.clone()),
+-            acq: RwLock::new(Acq::new(a.detector_offset)),
++            acq: RwLock::new(Acq::new(a.detector_offset, counts_only)),
+             map_points: RwLock::new(Arc::new(Vec::new())),
+             map_version: AtomicU64::new(0),
+             density: RwLock::new(None),
+@@ -164,7 +167,7 @@ impl Shared {
+ 
+     /// New run: fresh acquisition (keeping gravity), cleared result.
+     pub fn reset_acq(&self) {
+-        let mut acq = Acq::new(self.detector_offset);
++        let mut acq = Acq::new(self.detector_offset, self.detector == "redpitaya");
+         if let Some(g) = *self.gravity.lock().unwrap() {
+             acq.traj.set_gravity(g);
+         }
+@@ -453,7 +456,7 @@ fn snapshot(s: &Shared, eng: &Engine, a: &Args, t_start: Instant) -> Value {
+     json!({
+         "ok": true,
+         "roi": roi_name,
+-        "roi_kev": [roi.0, roi.1],
++        "roi_kev": if s.cal.is_some() { json!([roi.0, roi.1]) } else { Value::Null },
+         "sources": sources,
+         "background_cps": round(background, 2),
+         "n_samples": walk.len(),
+diff --git a/gamma_rs/src/record.rs b/gamma_rs/src/record.rs
+index b93fab3..23bdc98 100644
+--- a/gamma_rs/src/record.rs
++++ b/gamma_rs/src/record.rs
+@@ -35,7 +35,10 @@ pub fn save(s: &Shared, _quiet: bool) -> Result<PathBuf> {
+             (
+                 acq.event_t.clone(),
+                 acq.event_e.clone(),
++                acq.mca_words.iter().flat_map(|r|r.iter().copied()).collect::<Vec<u32>>(),
++                acq.mca_epoch_ns.clone(),
+                 acq.msg_t.clone(),
++                (0..acq.msg_t.len()).map(|i| if i == 0 { 0.0 } else { acq.live_for(i) }).collect::<Vec<f64>>(),
+                 poses,
+                 live_p.iter().flat_map(|p| p.iter().copied()).collect::<Vec<f64>>(),
+                 acq.traj.align,
+@@ -46,7 +49,7 @@ pub fn save(s: &Shared, _quiet: bool) -> Result<PathBuf> {
+             acq.true_stamps.clone(),
+         )
+     };
+-    let (event_t, event_e, msg_t, poses, live_xyz, align, spectrum, bkg) = snap;
++    let (event_t, event_e, mca_words, mca_epoch_ns, msg_t, msg_live, poses, live_xyz, align, spectrum, bkg) = snap;
+     let (meas_dir, notes) = match &*s.meas.lock().unwrap() {
+         crate::recon::MeasState::Measuring(m) => (Some(m.dir.clone()), Some(m.notes.clone())),
+         _ => (None, None),
+@@ -58,6 +61,10 @@ pub fn save(s: &Shared, _quiet: bool) -> Result<PathBuf> {
+         let mut w = npyz::npz::NpzWriter::create(&tmp)?;
+         put(&mut w, "event_t", &[event_t.len() as u64], &event_t)?;
+         put(&mut w, "event_e", &[event_e.len() as u64], &event_e)?;
++        if s.detector=="redpitaya" && mca_words.len()==event_t.len()*9 && mca_epoch_ns.len()==event_t.len() {
++            put(&mut w,"mca_words",&[event_t.len() as u64,9],&mca_words)?;
++            put(&mut w,"mca_epoch_ns",&[event_t.len() as u64],&mca_epoch_ns)?;
++        }
+         put(&mut w, "msg_t", &[msg_t.len() as u64], &msg_t)?;
+         let pt: Vec<f64> = poses.iter().map(|p| p.0).collect();
+         let pxyz: Vec<f64> = poses.iter().flat_map(|p| p.1.iter().map(|&v| f64::from(v))).collect();
+@@ -74,7 +81,9 @@ pub fn save(s: &Shared, _quiet: bool) -> Result<PathBuf> {
+         put(&mut w, "map_points", &[map.len() as u64, 3], &mflat)?;
+         put(&mut w, "detector_offset", &[3], &s.detector_offset)?;
+         put(&mut w, "bkg_window", &[2], &bkg)?;
+-        put(&mut w, "calibration", &[3], &s.cal.params())?;
++        put(&mut w, "calibration", &[3], &s.cal.as_ref().map(|c| c.params()).unwrap_or([f64::NAN; 3]))?;
++        put(&mut w, "counts_only", &[], &[s.detector == "redpitaya"])?;
++        put(&mut w, "msg_live", &[msg_live.len() as u64], &msg_live)?;
+         for (name, g) in [("density", s.density.read().unwrap().clone()), ("grid", s.grid.read().unwrap().clone())] {
+             put(&mut w, &format!("{name}_available"), &[], &[g.is_some()])?;
+             let Some(g) = g else { continue };
+@@ -160,7 +169,15 @@ pub fn replay(s: &Arc<Shared>, path: &Path, speed: f64) -> Result<()> {
+     let mut npz = npyz::npz::NpzArchive::open(path).with_context(|| format!("opening {}", path.display()))?;
+     let event_t: Vec<f64> = read(&mut npz, "event_t")?;
+     let event_e: Vec<f32> = read(&mut npz, "event_e")?;
++    let mca_words: Vec<u32> = read(&mut npz,"mca_words").unwrap_or_default();
++    let mca_epoch_ns: Vec<i64> = read(&mut npz,"mca_epoch_ns").unwrap_or_default();
++    if !mca_words.is_empty() && mca_words.len()!=event_t.len()*9 {return Err(anyhow!("Invalid MCA raw record length"));}
+     let msg_t: Vec<f64> = read(&mut npz, "msg_t")?;
++    let msg_live: Vec<f64> = read(&mut npz, "msg_live").unwrap_or_default();
++    let counts_only: Vec<bool> = read(&mut npz, "counts_only").unwrap_or_default();
++    if counts_only.first().copied().unwrap_or(false) && s.detector != "redpitaya" {
++        return Err(anyhow!("This is an uncalibrated Red Pitaya run; replay with --detector redpitaya --roi gross"));
++    }
+     let pose_t: Vec<f64> = read(&mut npz, "pose_t")?;
+     let pose_xyz: Vec<f64> = read(&mut npz, "pose_xyz")?;
+     let pose_quat: Vec<f64> = read(&mut npz, "pose_quat").unwrap_or_default();
+@@ -189,7 +206,7 @@ pub fn replay(s: &Arc<Shared>, path: &Path, speed: f64) -> Result<()> {
+     // Shift recorded stamps so the replay looks live (status lights, clocks).
+     let shift = crate::state::now_wall() - t0;
+     let (mut ip, mut ie) = (0usize, 0usize);
+-    for &tm in &msg_t {
++    for (im, &tm) in msg_t.iter().enumerate() {
+         // Poses up to this message time.
+         let mut acq_poses = Vec::new();
+         while ip < pose_t.len() && pose_t[ip] <= tm {
+@@ -198,8 +215,16 @@ pub fn replay(s: &Arc<Shared>, path: &Path, speed: f64) -> Result<()> {
+             ip += 1;
+         }
+         let mut ev = Vec::new();
++        let mut mca_t = Vec::new();
++        let mut raw: Vec<[u32;9]>=Vec::new();
++        let mut epochs=Vec::new();
+         while ie < order.len() && event_t[order[ie]] <= tm {
+             ev.push(event_e[order[ie]]);
++            mca_t.push(event_t[order[ie]] + shift);
++            if mca_words.len()==event_t.len()*9 {
++                raw.push(mca_words[order[ie]*9..order[ie]*9+9].try_into().unwrap());
++                epochs.push(mca_epoch_ns.get(order[ie]).copied().unwrap_or(0));
++            }
+             ie += 1;
+         }
+         {
+@@ -207,7 +232,19 @@ pub fn replay(s: &Arc<Shared>, path: &Path, speed: f64) -> Result<()> {
+             for (t, p, q) in acq_poses {
+                 acq.traj.add_pose(t, p, q);
+             }
+-            acq.add_events(tm + shift, ev.into_iter());
++            if s.detector == "redpitaya" {
++                if im == 0 {
++                    acq.msg_t.push(tm + shift);
++                    acq.msg_live.push(0.0);
++                } else {
++                    acq.add_mca_batch(msg_t[im - 1] + shift, tm + shift,
++                                     msg_live.get(im).copied().unwrap_or(tm - msg_t[im - 1]), mca_t.into_iter());
++                    acq.mca_words.extend(raw);
++                    acq.mca_epoch_ns.extend(epochs);
++                }
++            } else {
++                acq.add_events(tm + shift, ev.into_iter());
++            }
+         }
+         if speed > 0.0 {
+             let target = (tm - t0) / speed;
+diff --git a/gamma_rs/src/ros.rs b/gamma_rs/src/ros.rs
+index 5c682a2..2721487 100644
+--- a/gamma_rs/src/ros.rs
++++ b/gamma_rs/src/ros.rs
+@@ -15,7 +15,7 @@ use r2r::geometry_msgs::msg::{PoseStamped, Vector3Stamped};
+ use r2r::nav_msgs::msg::{OccupancyGrid, Path as PathMsg};
+ use r2r::sensor_msgs::msg::{PointCloud2, PointField};
+ use r2r::sigma50_msgs::msg::Sigma50Raw;
+-use r2r::std_msgs::msg::{Header, String as StringMsg};
++use r2r::std_msgs::msg::{Header, String as StringMsg, UInt8MultiArray};
+ use r2r::std_srvs::srv::Trigger;
+ use r2r::visualization_msgs::msg::{Marker, MarkerArray};
+ use serde_json::{Value, json};
+@@ -96,7 +96,8 @@ pub fn run(s: Arc<Shared>) -> Result<()> {
+     let kf_qos = QosProfile::default().keep_last(200).reliable();
+     let mut clock = r2r::Clock::create(r2r::ClockType::RosTime)?;
+ 
+-    let gamma = node.subscribe::<Sigma50Raw>("/sigma50_raw", QosProfile::default().keep_last(100))?;
++    let gamma = if s.detector == "sigma50" { Some(node.subscribe::<Sigma50Raw>("/sigma50_raw", QosProfile::default().keep_last(100))?) } else { None };
++    let mca = if s.detector == "redpitaya" { Some(node.subscribe::<UInt8MultiArray>("/redpitaya/events", QosProfile::default().keep_last(100))?) } else { None };
+     let pose = node.subscribe::<PoseStamped>("/lightning/pose", QosProfile::default().keep_last(50))?;
+     let kf = node.subscribe::<PoseStamped>("/lightning/keyframe/pose", kf_qos)?;
+     let path = node.subscribe::<PathMsg>("/lightning/path", latched.clone())?;
+@@ -115,7 +116,7 @@ pub fn run(s: Arc<Shared>) -> Result<()> {
+ 
+     let mut pool = LocalPool::new();
+     let sp = pool.spawner();
+-    {
++    if let Some(gamma) = gamma {
+         let s = s.clone();
+         sp.spawn_local(gamma.for_each(move |m| {
+             let stamp = ns(&m.header.stamp) as f64 * 1e-9;
+@@ -126,12 +127,33 @@ pub fn run(s: Arc<Shared>) -> Result<()> {
+             let mut acq = s.acq.write().unwrap();
+             let energies: Vec<f32> = m.channels.iter().map(|&c| {
+                 let u = acq.dither();
+-                s.cal.energy(f64::from(c) + u)
++                s.cal.as_ref().unwrap().energy(f64::from(c) + u)
+             }).collect();
+             acq.add_events(stamp, energies.into_iter());
+             futures::future::ready(())
+         }))?;
+     }
++    if let Some(mca) = mca {
++        let s = s.clone();
++        sp.spawn_local(mca.for_each(move |m| {
++            match crate::redpitaya::parse(&m.data) {
++                Ok(batch) => {
++                    s.note_det(batch.end_s);
++                    if s.ingesting() {
++                        let mut acq=s.acq.write().unwrap();
++                        let before=acq.n_events();
++                        acq.add_mca_batch(batch.start_s, batch.end_s, batch.live_s, batch.events.into_iter());
++                        if acq.n_events()>before {
++                            acq.mca_epoch_ns.extend(std::iter::repeat_n(batch.epoch_ns,batch.words.len()));
++                            acq.mca_words.extend(batch.words);
++                        }
++                    }
++                }
++                Err(e) => eprintln!("Rejected malformed Red Pitaya batch: {e}"),
++            }
++            futures::future::ready(())
++        }))?;
++    }
+     {
+         let s = s.clone();
+         sp.spawn_local(pose.for_each(move |m| {
+diff --git a/gamma_rs/src/state.rs b/gamma_rs/src/state.rs
+index 834f395..b576e08 100644
+--- a/gamma_rs/src/state.rs
++++ b/gamma_rs/src/state.rs
+@@ -17,7 +17,12 @@ pub struct Acq {
+     /// Event arrival stamps and energies (keV), append-only.
+     pub event_t: Vec<f64>,
+     pub event_e: Vec<f32>,
++    /// Accepted MCA records only: eight FPGA words followed by channel 1..4.
++    pub mca_words: Vec<[u32;9]>,
++    pub mca_epoch_ns: Vec<i64>,
+     pub msg_t: Vec<f64>,
++    pub msg_live: Vec<f64>,
++    pub counts_only: bool,
+     pub spectrum: Vec<u64>,
+     pub traj: Trajectory,
+     /// Stamps (latest pose time) at which the operator marked a true source.
+@@ -28,12 +33,16 @@ pub struct Acq {
+ }
+ 
+ impl Acq {
+-    pub fn new(detector_offset: [f64; 3]) -> Self {
++    pub fn new(detector_offset: [f64; 3], counts_only: bool) -> Self {
+         Self {
+             started_wall: now_wall(),
+             event_t: Vec::new(),
+             event_e: Vec::new(),
++            mca_words: Vec::new(),
++            mca_epoch_ns: Vec::new(),
+             msg_t: Vec::new(),
++            msg_live: Vec::new(),
++            counts_only,
+             spectrum: vec![0; NBINS],
+             traj: Trajectory::new(detector_offset),
+             true_stamps: Vec::new(),
+@@ -57,6 +66,7 @@ impl Acq {
+             return; // duplicate/out-of-order delivery must not create negative exposure
+         }
+         self.msg_t.push(stamp_s);
++        self.msg_live.push(prev.map(|p| if stamp_s - p <= MAX_GAP_S { stamp_s - p } else { 0.0 }).unwrap_or(0.0));
+         let span = match prev {
+             Some(p) => (stamp_s - p).min(0.2),
+             None => 0.1,
+@@ -65,9 +75,34 @@ impl Acq {
+             let u = self.uniform();
+             self.event_t.push(stamp_s - span * u);
+             self.event_e.push(e);
+-            let idx = ((e / EMAX_KEV) * NBINS as f32) as usize;
+-            self.spectrum[idx.min(NBINS - 1)] += 1;
++            if e.is_finite() {
++                let idx = ((e / EMAX_KEV) * NBINS as f32) as usize;
++                self.spectrum[idx.min(NBINS - 1)] += 1;
++            }
++        }
++    }
++
++    /// MCA events retain their measured FPGA times; unknown energy is NaN.
++    pub fn add_mca_batch(&mut self, start_s: f64, end_s: f64, live_s: f64, events: impl Iterator<Item = f64>) {
++        if self.msg_t.last().is_some_and(|&p| end_s <= p) { return; }
++        if self.msg_t.is_empty() {
++            self.msg_t.push(start_s);
++            self.msg_live.push(0.0);
+         }
++        self.msg_t.push(end_s);
++        self.msg_live.push(live_s.max(0.0).min(end_s - start_s));
++        for t in events {
++            self.event_t.push(t);
++            self.event_e.push(f32::NAN);
++        }
++    }
++
++    pub fn live_for(&self, k: usize) -> f64 {
++        self.msg_live.get(k).copied().unwrap_or_else(|| self.msg_t[k] - self.msg_t[k - 1])
++    }
++
++    fn matches_roi(&self, e: f32, roi: (f32, f32)) -> bool {
++        self.counts_only || (e >= roi.0 && e < roi.1)
+     }
+ 
+     pub fn dither(&mut self) -> f64 {
+@@ -102,13 +137,13 @@ impl Acq {
+                 break;
+             }
+             i += 1;
+-            if t1 - t0 > MAX_GAP_S {
++            if t1 - t0 > MAX_GAP_S || self.live_for(i - 1) <= 0.0 {
+                 continue;
+             }
+             let Some((pos, quat)) = Trajectory::interp(poses, tc, MAX_GAP_S) else { continue };
+             let _ = ev_cursor;
+             let n = self.count_roi(t0, t1, roi);
+-            out.push((Sample { t: tc, pos, quat, dwell: (t1 - t0) as f32, counts: n as f32, det: 0 }, self.in_background(tc)));
++            out.push((Sample { t: tc, pos, quat, dwell: self.live_for(i - 1) as f32, counts: n as f32, det: 0 }, self.in_background(tc)));
+         }
+         (out, i)
+     }
+@@ -118,7 +153,7 @@ impl Acq {
+     pub fn count_roi(&self, t0: f64, t1: f64, roi: (f32, f32)) -> usize {
+         let lo = self.event_t.partition_point(|&t| t < t0 - 0.25);
+         let hi = self.event_t.partition_point(|&t| t <= t1 + 0.25);
+-        (lo..hi).filter(|&k| self.event_t[k] > t0 && self.event_t[k] <= t1 && self.event_e[k] >= roi.0 && self.event_e[k] < roi.1).count()
++        (lo..hi).filter(|&k| self.event_t[k] > t0 && self.event_t[k] <= t1 && self.matches_roi(self.event_e[k], roi)).count()
+     }
+ 
+     /// Rate series for the UI: (t rel. to newest, gross cps, roi cps) per bin.
+@@ -148,7 +183,7 @@ impl Acq {
+             for j in ia..=ib.min(nb - 1) {
+                 let lo = start + j as f64 * bin_s;
+                 let ov = (b.min(lo + bin_s) - a.max(lo)).max(0.0);
+-                live[j] += ov;
++                live[j] += ov * self.live_for(k) / (self.msg_t[k] - self.msg_t[k - 1]);
+             }
+         }
+         let mut gross = vec![0u64; nb];
+@@ -162,7 +197,7 @@ impl Acq {
+             let j = (((t - start) / bin_s) as usize).min(nb - 1);
+             gross[j] += 1;
+             let e = self.event_e[k];
+-            if e >= roi.0 && e < roi.1 {
++            if self.matches_roi(e, roi) {
+                 roic[j] += 1;
+             }
+         }
+@@ -179,7 +214,7 @@ impl Acq {
+         for k in 1..self.msg_t.len() {
+             let (a, b) = (self.msg_t[k - 1], self.msg_t[k]);
+             if b - a <= MAX_GAP_S {
+-                live += (b.min(t1) - a.max(t0)).max(0.0);
++                live += (b.min(t1) - a.max(t0)).max(0.0) * self.live_for(k) / (b - a);
+             }
+         }
+         if live < 5.0 {
+@@ -193,3 +228,33 @@ impl Acq {
+ pub fn now_wall() -> f64 {
+     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
+ }
++
++#[cfg(test)]
++mod mca_tests {
++    use super::*;
++    #[test]
++    fn mca_keeps_time_uses_live_ticks_and_counts_unknown_energies() {
++        let mut a = Acq::new([0.0; 3], true);
++        a.add_mca_batch(0.0, 0.1, 0.05, [0.025, 0.075].into_iter());
++        assert_eq!(a.event_t, vec![0.025, 0.075]);
++        assert!(a.event_e.iter().all(|e| e.is_nan()));
++        assert_eq!(a.spectrum.iter().sum::<u64>(), 0);
++        assert_eq!(a.count_roi(0.0, 0.1, (0.0, EMAX_KEV)), 2);
++        let (_, gross, roi) = a.rate_series((0.0, EMAX_KEV), 1.0, 10.0).unwrap();
++        assert!((gross[0].unwrap() - 40.0).abs() < 1e-9);
++        assert_eq!(gross, roi);
++        a.add_mca_batch(0.1, 0.2, 0.1, [].into_iter());
++        assert_eq!(a.msg_t.len(), 3);
++        a.add_mca_batch(0.1, 0.2, 0.1, [0.15].into_iter());
++        assert_eq!(a.n_events(), 2);
++    }
++    #[test]
++    fn sigma50_keeps_energy_selection_and_wall_exposure() {
++        let mut a = Acq::new([0.0; 3], false);
++        a.add_events(1.0, [].into_iter());
++        a.add_events(1.1, [500.0, 1000.0].into_iter());
++        assert_eq!(a.count_roi(1.0, 1.1, (400.0, 600.0)), 1);
++        assert!((a.live_for(1) - 0.1).abs() < 1e-12);
++        assert_eq!(a.spectrum.iter().sum::<u64>(), 2);
++    }
++}
+diff --git a/gamma_rs/src/web.rs b/gamma_rs/src/web.rs
+index f229c5e..6491f9e 100644
+--- a/gamma_rs/src/web.rs
++++ b/gamma_rs/src/web.rs
+@@ -66,10 +66,13 @@ pub fn status(s: &Shared, ros_now: Option<f64>) -> Value {
+         "clock_skew_s": match (last_msg, last_pose) { (Some(a), Some(b)) => Some(round(a - b, 2)), _ => None },
+         "gravity": acq.traj.has_gravity,
+         "events": acq.n_events(),
++        "detector": s.detector,
++        "energy_calibrated": s.cal.is_some(),
++        "exposure": if acq.counts_only { "FPGA live ticks" } else { "detector message spans" },
+         "cps": cps.map(|v| round(v, 1)),
+         "roi_cps": roi_cps.map(|v| round(v, 2)),
+         "roi": *s.roi_name.read().unwrap(),
+-        "roi_kev": [roi.0, roi.1],
++        "roi_kev": if s.cal.is_some() { json!([roi.0, roi.1]) } else { Value::Null },
+         "poses": acq.traj.len(),
+         "map_points": s.map_points.read().unwrap().len(),
+         "recon": {
+@@ -137,7 +140,7 @@ async fn ws(State(s): State<S>, up: WebSocketUpgrade) -> Response {
+ }
+ 
+ async fn ws_loop(s: S, mut sock: WebSocket) {
+-    let rois: serde_json::Map<String, Value> = s.rois.iter().map(|(k, v)| (k.clone(), json!([v.0, v.1]))).collect();
++    let rois: serde_json::Map<String, Value> = s.rois.iter().map(|(k, v)| (k.clone(), if s.cal.is_some() { json!([v.0, v.1]) } else { Value::Null })).collect();
+     let hello = json!({"type": "hello", "map_version": s.map_version.load(Ordering::SeqCst), "rois": rois});
+     if sock.send(Message::Text(hello.to_string().into())).await.is_err() {
+         return;
+@@ -225,9 +228,9 @@ async fn result(State(s): State<S>) -> Response {
+ 
+ async fn spectrum(State(s): State<S>) -> Response {
+     let acq = s.acq.read().unwrap();
+-    let live = if acq.msg_t.len() > 1 { acq.msg_t[acq.msg_t.len() - 1] - acq.msg_t[0] } else { 0.0 };
++    let live = (1..acq.msg_t.len()).map(|i| acq.live_for(i)).sum::<f64>();
+     let roi = s.roi();
+-    jsonr(json!({"counts": acq.spectrum, "emax": EMAX_KEV, "live_s": live, "roi": [roi.0, roi.1], "roi_name": *s.roi_name.read().unwrap()}))
++    jsonr(json!({"counts": acq.spectrum, "emax": EMAX_KEV, "live_s": live, "roi": [roi.0, roi.1], "roi_name": *s.roi_name.read().unwrap(), "calibrated": s.cal.is_some()}))
+ }
+ 
+ async fn rates(State(s): State<S>, Query(q): Query<std::collections::HashMap<String, String>>) -> Response {
+@@ -348,7 +351,9 @@ async fn measure_stop(State(s): State<S>) -> Response {
+         let prev = std::mem::replace(&mut *s2.meas.lock().unwrap(), crate::recon::MeasState::Preview);
+         let crate::recon::MeasState::Measuring(m) = prev else { anyhow::bail!("no measurement is running") };
+         let (notes, mode, t0) = (m.notes.clone(), m.mode.name(), m.started_wall);
+-        let out = m.stop(json!({"events": events, "poses": poses}))?;
++        let out = m.stop(json!({"events": events, "poses": poses, "detector": s.detector,
++                               "energy_calibrated": s.cal.is_some(),
++                               "exposure": if s.detector == "redpitaya" { "FPGA live ticks" } else { "message spans" }}))?;
+         let _ = dir;
+         let duration_s = crate::state::now_wall() - t0;
+         *s2.meas.lock().unwrap() = crate::recon::MeasState::Stopped { dir: out.clone(), notes, mode, duration_s };

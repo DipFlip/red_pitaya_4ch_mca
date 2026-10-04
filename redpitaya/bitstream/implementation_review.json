@@ -1,0 +1,39 @@
+{
+  "setup_margin_ns": 0.049,
+  "hold_margin_ns": 0.051,
+  "clock_hz": 125000000,
+  "bitgen_drc_errors": 0,
+  "utilization": {
+    "luts": 8047,
+    "flip_flops": 9736,
+    "ramb36": 16,
+    "ramb18": 8,
+    "dsp": 8
+  },
+  "unconstrained_internal_endpoints": [
+    "i_hk/i_DNA/READ",
+    "i_hk/i_DNA/SHIFT"
+  ],
+  "inherited_io_limitation": "Stock ADC IO input/output delays remain unspecified; no hardware ADC timing characterization.",
+  "timing_domains": [
+    [
+      1,
+      2
+    ],
+    [
+      3,
+      4
+    ]
+  ],
+  "timestamp_reference": "Registered primary-clock Gray counter, two synchronizer stages and local decode; nominal matching delay in IN1/IN2; channel offsets and cross-pair phase unmeasured.",
+  "cdc_review": "Unwaived report reviewed. MCA Gray reference recognized multi-bit ASYNC_REG; bus skew 1.025 ns (<8 ns). Request/response mailboxes hold bundled payload through two-stage toggle acknowledgement. Both directions constrained max 8 ns; response bus skew 1.338 ns (<8 ns). Existing PS sys_bus_cdc uses vendor held-payload handshake; stock SPI/IDELAY startup/reset and DNA crossings retained. Generic CDC checker warnings remain for handshake payloads and inherited startup/reset/IO paths; no blanket clean-CDC claim.",
+  "hardware_limits": "Fractional timestamp granularity is not measured resolution. Split-pulse channel calibration, inter-pair phase stability, and sustained few-kHz hardware throughput remain unmeasured.",
+  "device_tree": "Reuse stock z20_125_4ch/v0.94 overlay; PS bus preserved. MCA4 ABI 2.0 at 0x40700000; channels at +0x1000..+0x4000.",
+  "report_sha256": {
+    "mca_timing.rpt": "6d156ee704c2f62365327348205257d1a3d013eccd7cd71e4eca83340a4c7913",
+    "mca_drc.rpt": "ca44d5df5706c41d9009e98ce9e04a07dd57fc7158fd82c1c764d86167dd01e9",
+    "mca_cdc.rpt": "19ad33b4e6fed65414462bc1d0f5c53eead27d401326a26004ab42d0013c3c06",
+    "mca_bus_skew.rpt": "22335d1ea796efd6de7db3f612816d17e0405102045db7f2010b60a05a414015",
+    "mca_signed_off.dcp": "f76832d82f800bac60db2980fe4a1dd17434294a26c82b20b5f02309ace5dae1"
+  }
+}

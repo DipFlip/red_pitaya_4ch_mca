@@ -1,0 +1,30 @@
+services:
+  redpitaya:
+    image: red-pitaya-mca/receiver:${ROS_DISTRO:-jazzy}
+    build:
+      context: .
+      dockerfile: docker/redpitaya/Dockerfile
+      args:
+        ROS_DISTRO: ${ROS_DISTRO:-jazzy}
+    network_mode: host
+    ipc: host
+    restart: "no"
+    stop_grace_period: 15s
+    environment:
+      ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-42}
+      RMW_IMPLEMENTATION: ${RMW_IMPLEMENTATION:-rmw_cyclonedds_cpp}
+      REDPITAYA_HOST: ${REDPITAYA_HOST:-rp-f0d343.local}
+      REDPITAYA_HOST_KEY_ALIAS: ${REDPITAYA_HOST_KEY_ALIAS:-rp-f0d343.local}
+      REDPITAYA_PORT: ${REDPITAYA_PORT:-22}
+      REDPITAYA_CHANNELS: ${REDPITAYA_CHANNELS:-1}
+      REDPITAYA_SHORT_US: ${REDPITAYA_SHORT_US:-2}
+      REDPITAYA_LONG_US: ${REDPITAYA_LONG_US:-25}
+      REDPITAYA_RECORD: ${REDPITAYA_RECORD:-}
+    volumes:
+      - ./redpitaya/runtime:/auth:ro
+      - ./redpitaya/captures:/captures
+    logging:
+      driver: local
+      options:
+        max-size: "5m"
+        max-file: "2"

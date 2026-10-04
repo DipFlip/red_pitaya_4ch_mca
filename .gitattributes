@@ -1,0 +1,3 @@
+*.bin binary
+# Unified-diff context lines deliberately end with a space when blank.
+*.patch whitespace=-blank-at-eol
