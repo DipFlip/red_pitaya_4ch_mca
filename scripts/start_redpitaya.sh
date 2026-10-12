@@ -21,3 +21,6 @@ docker compose build redpitaya
 bash scripts/deploy_redpitaya.sh
 docker compose up -d redpitaya
 echo "MCA active inputs: $REDPITAYA_CHANNELS. Logs: docker compose logs -f redpitaya"
+if [[ "${REDPITAYA_UI_PORT:-8080}" != 0 ]]; then
+  echo "Live spectra and count rate: http://localhost:${REDPITAYA_UI_PORT:-8080}"
+fi

@@ -178,6 +178,25 @@ class Session:
         self.last_clock = clock
 
 
+def pace_replay(target, is_stopping):
+    while not is_stopping():
+        remaining = target - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(.01, remaining))
+
+
+def update_dashboard(dashboard, session, kind, value):
+    """Consume validated batches; V2 aggregate packets must not double-count inputs."""
+    dashboard.set_channels(session.active_channels)
+    if kind == "channel_batch" or (kind == "batch" and session.decoder.version == 1):
+        channel, packet = value if kind == "channel_batch" else (1, value)
+        _, end, start, _, live, _, reject = BATCH.unpack_from(packet)
+        dashboard.batch(channel, start, end, live, EVENT.iter_unpack(packet[BATCH.size:]), reject)
+    elif kind == "status":
+        dashboard.set_status(value)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--channels", type=parse_channels, default=parse_channels(os.getenv("REDPITAYA_CHANNELS", "1")))
@@ -192,6 +211,8 @@ def main():
     parser.add_argument("--reject-flags", type=lambda s: int(s, 0), default=31)
     parser.add_argument("--input", type=Path, help="Replay a complete .mca capture, paced by FPGA clock")
     parser.add_argument("--record", type=Path, default=os.getenv("REDPITAYA_RECORD") or None, help="Optional new binary capture file")
+    parser.add_argument("--ui-port", type=int, default=int(os.getenv("REDPITAYA_UI_PORT", "0")), help="Dashboard port; 0 disables it")
+    parser.add_argument("--ui-bind", default=os.getenv("REDPITAYA_UI_BIND", "127.0.0.1"))
     args = parser.parse_args()
     if not all(math.isfinite(v) for v in (args.short_us, args.long_us, args.seconds)):
         parser.error("Settings must be finite")
@@ -199,6 +220,12 @@ def main():
         parser.error("Gates outside FPGA range")
     if args.seconds < 0 or not 0 <= args.reject_flags <= 65535:
         parser.error("Invalid duration or reject flags")
+    if not 0 <= args.ui_port <= 65535:
+        parser.error("UI port must be between 0 and 65535")
+    dashboard = None
+    if args.ui_port:
+        from dashboard import Dashboard
+        dashboard = Dashboard(args.channels, recording=args.record)
     import rclpy
     from rclpy.node import Node
     from std_msgs.msg import String, UInt8MultiArray, UInt32
@@ -228,14 +255,15 @@ def main():
             recording.write(data)
             recording.flush()
         for kind, value, accepted in session.feed(data, node.get_clock().now().nanoseconds):
+            if dashboard:
+                update_dashboard(dashboard, session, kind, value)
             if kind == "batch":
                 if args.input:
                     clock = BATCH.unpack_from(value)[1]
                     if first_clock is None:
                         first_clock = clock
                     target = replay_start + (clock - first_clock) * 8e-9
-                    while not stopping and time.monotonic() < target:
-                        time.sleep(min(.01, target - time.monotonic()))
+                    pace_replay(target, lambda: stopping)
                 batches.publish(UInt8MultiArray(data=value))
                 counts.publish(UInt32(data=accepted))
             elif kind == "channel_batch":
@@ -246,6 +274,9 @@ def main():
                 statuses.publish(String(data=json.dumps(value, separators=(",", ":"))))
         rclpy.spin_once(node, timeout_sec=0)
     try:
+        if dashboard:
+            dashboard.start(args.ui_bind, args.ui_port)
+            print(f"Live MCA dashboard: http://{args.ui_bind}:{args.ui_port}", file=sys.stderr)
         if args.input:
             with args.input.open("rb") as f:
                 # Small chunks keep recorded batch timing meaningful.
@@ -294,6 +325,10 @@ def main():
         if not stopping or session.decoder.done:
             session.decoder.finish()
         node.get_logger().info(f"MCA {'complete' if session.decoder.done else 'interrupted'}: {session.accepted} accepted, {session.rejected} flagged")
+    except BaseException as exc:
+        if dashboard:
+            dashboard.fail(exc)
+        raise
     finally:
         if process and process.poll() is None:
             process.terminate()
@@ -314,6 +349,8 @@ def main():
             recording.close()
         node.destroy_node()
         rclpy.shutdown()
+        if dashboard:
+            dashboard.close()
 
 
 if __name__ == "__main__":

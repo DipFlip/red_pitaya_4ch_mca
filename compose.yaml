@@ -20,6 +20,8 @@ services:
       REDPITAYA_SHORT_US: ${REDPITAYA_SHORT_US:-2}
       REDPITAYA_LONG_US: ${REDPITAYA_LONG_US:-25}
       REDPITAYA_RECORD: ${REDPITAYA_RECORD:-}
+      REDPITAYA_UI_PORT: ${REDPITAYA_UI_PORT:-8080}
+      REDPITAYA_UI_BIND: ${REDPITAYA_UI_BIND:-127.0.0.1}
     volumes:
       - ./redpitaya/runtime:/auth:ro
       - ./redpitaya/captures:/captures

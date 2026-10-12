@@ -20,6 +20,7 @@ is left to a later receiver implementation.
 | `redpitaya/board` | Board readout, temporary FPGA load, run/stop ownership and stock restoration |
 | `redpitaya/bitstream` | Checked `.bin`, source hashes and implementation review |
 | `redpitaya/reader.py` | SSH/TCP list-mode receiver, ROS 2 batches, counts, status and raw recording |
+| `redpitaya/dashboard.py`, `redpitaya/web` | Standalone live integral spectra and count-rate dashboard |
 | `scripts` | Standalone deploy/start/stop helpers |
 | `integrations/airy_slam` | Optional Rust gamma/recording integration patch and service overlay |
 
@@ -63,6 +64,27 @@ bash scripts/start_redpitaya.sh --channels 1
 docker compose logs -f redpitaya
 bash scripts/stop_redpitaya.sh
 ```
+
+The start script also serves the **live dashboard at http://localhost:8080**.
+It is included in this repository and needs no Airy-SLAM checkout. Select any
+active input to overlay its accumulated long-gate integral spectrum and recent
+count rate; export the histogram bins as CSV. Plots include accepted events
+only. Flagged events, out-of-range integrals and FIFO drops are shown separately.
+Rates use elapsed FPGA time and are not dead-time corrected. Integrals are in
+nominal V·µs, not calibrated keV. The dashboard is read-only; use the start/stop
+scripts to control acquisition. Stopping also stops the UI.
+
+`REDPITAYA_UI_PORT` changes the port (default `8080`; `0` disables the UI).
+The default bind address is loopback. Set `REDPITAYA_UI_BIND=0.0.0.0` to allow
+other computers on your network to open `http://<receiver-ip>:8080`.
+The dashboard has no login; use that setting only on a trusted network.
+
+On macOS, use Docker Desktop **4.34 or later** and enable **Settings → Resources
+→ Network → Enable host networking** for this Compose configuration. Use the
+board's reachable IP in `REDPITAYA_HOST` if `.local` does not resolve inside
+Docker. The receiver and browser UI use SSH/TCP and HTTP; external ROS topic
+discovery may need separate DDS configuration. The Linux receiver was hardware
+tested; macOS dashboard/receiver checks use capture replay, not live hardware.
 
 `REDPITAYA_SHORT_US` and `REDPITAYA_LONG_US` set gates; `REDPITAYA_CHANNELS` sets
 the same channel list as `--channels`. `REDPITAYA_RECORD=/captures/run-001.mca`

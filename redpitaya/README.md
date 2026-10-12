@@ -1,5 +1,28 @@
 # Receiver and binary interfaces
 
+## Standalone live dashboard
+
+`bash scripts/start_redpitaya.sh --channels 1,2` starts the Docker receiver and
+its bundled dashboard at **http://localhost:8080**. No Airy-SLAM checkout is
+needed. The page overlays per-channel long-gate integral histograms, plots
+accepted count rate over the last two minutes, reports flagged events and FIFO
+drops, and exports histogram bins as CSV. Underflow and overflow are counted
+separately. The spectrum uses 256 bins from 0 to 25 nominal V·µs; it is not an
+energy calibration. Rates divide accepted counts by each batch's elapsed FPGA
+time, without dead-time correction. Each new receiver process starts new plots.
+
+`REDPITAYA_UI_PORT` defaults to `8080` in Compose. Set it to `0` to disable the
+UI, or another port if 8080 is occupied. `REDPITAYA_UI_BIND` defaults to
+`127.0.0.1`; use `0.0.0.0` for trusted LAN access (the UI has no authentication).
+Direct ROS execution/replay can enable it with `--ui-port 8080`. The default for
+direct execution is disabled, so the optional Airy UI can keep its own port.
+On Docker Desktop for Mac, enable host networking as described in the root README.
+
+The HTTP thread reads bounded in-memory statistics; it does not open another
+board connection or acquire the MCA ownership lock. ROS topics and optional raw
+recording continue through the same receiver. The page marks stale or lost
+connections, and exits with the receiver when acquisition stops.
+
 ## Timing and coincidence preparation
 
 IN1–IN2 run in ADC01's clock domain; IN3–IN4 run in ADC23's. Raw samples remain

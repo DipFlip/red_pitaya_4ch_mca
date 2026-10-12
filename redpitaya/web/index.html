@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Red Pitaya · MCA</title>
+  <link rel="stylesheet" href="/style.css">
+  <script defer src="/app.js"></script>
+</head>
+<body>
+  <main>
+    <header>
+      <div><div class="eyebrow">RED PITAYA / FOUR-CHANNEL MCA</div><h1>Live acquisition<span class="dot">.</span></h1></div>
+      <div id="connection" class="connection" role="status">Connecting…</div>
+    </header>
+    <section class="metrics" aria-label="Acquisition summary">
+      <article><div class="label">ACCEPTED RATE</div><div class="metric"><span id="rate">—</span><small>counts/s</small></div><div class="hint">Per elapsed FPGA time</div></article>
+      <article><div class="label">ACCEPTED EVENTS</div><div class="metric" id="accepted">—</div><div class="hint">Since acquisition started</div></article>
+      <article><div class="label">FLAGGED EVENTS</div><div class="metric" id="rejected">—</div><div class="hint">Excluded from plots</div></article>
+      <article><div class="label">FIFO DROPS</div><div class="metric" id="drops">—</div><div class="hint">Reported by the FPGA</div></article>
+    </section>
+    <section class="channels-section" aria-label="Channel selection">
+      <div><h2>Inputs</h2><p>Select channels to show in both plots.</p></div>
+      <div id="channels" class="channels"></div>
+    </section>
+    <section class="panel">
+      <div class="panel-head"><div><h2>Integral spectrum</h2><p>Accepted pulse integrals · accumulated this run</p></div><div class="controls"><label><input type="checkbox" id="log-scale"> Log counts</label><a class="button" href="/api/spectrum.csv" download>Export CSV ↗</a></div></div>
+      <div class="plot"><canvas id="spectrum" aria-label="Long-gate integral histogram for selected inputs" role="img"></canvas></div>
+      <div class="panel-foot"><span>Long-gate integral (nominal V·µs)</span><span id="range-note">256 bins · 0–25 V·µs</span></div>
+    </section>
+    <section class="panel">
+      <div class="panel-head"><div><h2>Count rate</h2><p>Accepted events per second · latest two minutes</p></div><span class="tag">LIVE / 0.5 s refresh</span></div>
+      <div class="plot rate-plot"><canvas id="rate-chart" aria-label="Accepted count rate over time for selected inputs" role="img"></canvas></div>
+      <div class="panel-foot"><span>Time before latest batch (s)</span><span>Elapsed-time rate · no dead-time correction</span></div>
+    </section>
+    <footer><span id="run-info">Waiting for the first acquisition batch.</span><span>Integral spectra are not calibrated energy spectra.</span></footer>
+  </main>
+</body>
+</html>
